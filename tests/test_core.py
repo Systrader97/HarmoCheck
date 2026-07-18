@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from harmocheck.core import (
+    DEFAULT_TEA,
     TEaThreshold,
     analyze_workbook,
     classify_tae,
@@ -67,7 +68,7 @@ def test_end_to_end_creates_semestral_outputs(tmp_path):
     displayed = display_table(result.subpeer, "subpeer")
     assert list(displayed.columns) == [
         "Year-Survey", "Analyte", "Peer group", "Sub-peer group",
-        "Pooled Bias", "Pooled CV", "TAE", "Harmonization Level",
+        "Pooled Bias (%)", "Pooled CV (%)", "TAE (%)", "Harmonization Level",
     ]
     assert "ptMaterials" not in displayed.columns
 
@@ -75,6 +76,36 @@ def test_end_to_end_creates_semestral_outputs(tmp_path):
 def test_harmonization_categories():
     tea = TEaThreshold(5, 10, 15)
     assert [classify_tae(value, tea) for value in (5, 10, 15, 16)] == ["Optimal", "Desirable", "Minimum", "Not acceptable"]
+
+
+def test_default_tea_matches_configured_reference_values():
+    assert DEFAULT_TEA == {
+        "TSH": TEaThreshold(12.4, 24.7, 37.1),
+        "Free T4": TEaThreshold(3.1, 6.3, 9.4),
+        "Total T3": TEaThreshold(4.3, 8.7, 13.0),
+    }
+
+
+def test_analyte_with_one_surviving_peer_group_is_excluded(tmp_path):
+    materials = ["CH5-26-01", "CH5-26-02", "CH5-26-03"]
+    raw = synthetic_raw(materials)
+    total_t4_rows = []
+    for material_index, material in enumerate(materials):
+        for participant in range(1, 13):
+            total_t4_rows.append({
+                "Year": 2026,
+                "QC material": material,
+                "Participant": f"R{participant:03d}",
+                "Analyte": "Total T4",
+                "Peer group": "Roche",
+                "Sub-peer group": "cobas e801",
+                "Result": 2.0 + material_index * 0.1 + participant * 0.001,
+            })
+    workbook = tmp_path / "single_peer.xlsx"
+    pd.concat([raw, pd.DataFrame(total_t4_rows)], ignore_index=True).to_excel(workbook, index=False)
+    result = analyze_workbook(workbook, tmp_path / "output", generate_charts=False)
+    assert set(result.analyte["analyte"]) == {"TSH"}
+    assert "Total T4" not in set(result.coverage["analyte"])
 
 
 class HarmoCheckCoreTests(unittest.TestCase):
@@ -99,6 +130,12 @@ class HarmoCheckCoreTests(unittest.TestCase):
 
     def test_harmonization_categories(self):
         test_harmonization_categories()
+
+    def test_default_tea_matches_configured_reference_values(self):
+        test_default_tea_matches_configured_reference_values()
+
+    def test_analyte_with_one_surviving_peer_group_is_excluded(self):
+        test_analyte_with_one_surviving_peer_group_is_excluded(self._tmp_path())
 
 
 if __name__ == "__main__":

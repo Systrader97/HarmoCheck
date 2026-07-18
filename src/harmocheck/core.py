@@ -34,6 +34,7 @@ class AnalysisResult:
     raw_rows: int
     retained_rows: int
     periods: tuple[str, ...]
+    years: tuple[int, ...]
     subpeer: pd.DataFrame
     peer: pd.DataFrame
     analyte: pd.DataFrame
@@ -41,14 +42,15 @@ class AnalysisResult:
     pdf_path: Path
     tables_path: Path
     charts_dir: Path
+    chart_paths: Mapping[str, tuple[Path, ...]]
 
 
 HARMONIZATION_LEVELS = ("Optimal", "Desirable", "Minimum", "Not acceptable", "Unknown")
 RAW_COLUMNS = ("year", "qcMaterial", "participant", "analyte", "peerGroup", "subPeerGroup", "result")
 DEFAULT_TEA: dict[str, TEaThreshold] = {
-    "TSH": TEaThreshold(optimal=6.7, desirable=10.0, minimum=20.0),
-    "Free T4": TEaThreshold(optimal=5.0, desirable=7.0, minimum=12.0),
-    "Total T3": TEaThreshold(optimal=4.0, desirable=6.0, minimum=11.0),
+    "TSH": TEaThreshold(optimal=12.4, desirable=24.7, minimum=37.1),
+    "Free T4": TEaThreshold(optimal=3.1, desirable=6.3, minimum=9.4),
+    "Total T3": TEaThreshold(optimal=4.3, desirable=8.7, minimum=13.0),
 }
 
 DISPLAY_COLUMNS = {
@@ -69,9 +71,9 @@ DISPLAY_RENAMES = {
     "analyte": "Analyte",
     "peerGroup": "Peer group",
     "subPeerGroup": "Sub-peer group",
-    "pooledBias": "Pooled Bias",
-    "pooledCv": "Pooled CV",
-    "tae": "TAE",
+    "pooledBias": "Pooled Bias (%)",
+    "pooledCv": "Pooled CV (%)",
+    "tae": "TAE (%)",
     "harmonizationLevel": "Harmonization Level",
 }
 
@@ -205,7 +207,12 @@ def load_all_sheets(xlsx_path: str | Path) -> pd.DataFrame:
 
 
 def apply_tukey_and_min_participants(frame: pd.DataFrame) -> pd.DataFrame:
-    """Apply Tukey exclusion, n>=10, and complete 3-material analyte coverage."""
+    """Apply Tukey exclusion, n>=10, complete coverage, and a two-peer minimum.
+
+    A valid analyte assessment requires at least two peer groups that each
+    retain data for all three PT materials.  An analyte represented by only
+    one peer group cannot be used to assess nationwide harmonization.
+    """
 
     key_columns = ["evaluationPeriod", "qcMaterial", "analyte", "peerGroup", "subPeerGroup"]
     retained: list[pd.DataFrame] = []
@@ -222,10 +229,20 @@ def apply_tukey_and_min_participants(frame: pd.DataFrame) -> pd.DataFrame:
         return frame.iloc[0:0].copy()
     out = pd.concat(retained, ignore_index=True)
 
-    coverage = out.groupby(["evaluationPeriod", "analyte"])["qcMaterial"].nunique()
-    complete = coverage[coverage == 3].index
+    # A peer group must itself cover the complete three-material survey.
+    peer_coverage = out.groupby(["evaluationPeriod", "analyte", "peerGroup"])["qcMaterial"].nunique()
+    complete_peers = peer_coverage[peer_coverage == 3].index
+    out = out.set_index(["evaluationPeriod", "analyte", "peerGroup"]).loc[
+        lambda indexed: indexed.index.isin(complete_peers)
+    ].reset_index()
+    if out.empty:
+        return out
+
+    # Keep an assessment only when two or more complete peer groups remain.
+    peer_counts = out.groupby(["evaluationPeriod", "analyte"])["peerGroup"].nunique()
+    eligible_assessments = peer_counts[peer_counts >= 2].index
     return out.set_index(["evaluationPeriod", "analyte"]).loc[
-        lambda indexed: indexed.index.isin(complete)
+        lambda indexed: indexed.index.isin(eligible_assessments)
     ].reset_index()
 
 
@@ -316,6 +333,10 @@ def generate_trend_charts(peer: pd.DataFrame, analyte: pd.DataFrame, output_dir:
     import matplotlib.pyplot as plt
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    # The output directory belongs to this report.  Clear old chart files so
+    # that analytes removed by the current eligibility rules never reappear.
+    for previous_chart in output_dir.glob("*.png"):
+        previous_chart.unlink()
     definitions = (
         ("bias", "pooledBias", "Pooled Bias (%)"),
         ("cv", "pooledCv", "Pooled CV (%)"),
@@ -414,9 +435,9 @@ def _draw_table_section(
     displayed = display_table(frame[frame["evaluationPeriod"].eq(period)], {"Sub-peer group": "subpeer", "Peer group": "peer", "Analyte": "analyte"}[level])
     columns = list(displayed.columns)
     width_map = {
-        "Sub-peer group": [1.65, 1.5, 2.25, 3.55, 1.65, 1.55, 1.05, 2.3],
-        "Peer group": [1.75, 1.7, 3.9, 1.75, 1.6, 1.1, 2.45],
-        "Analyte": [1.85, 2.2, 2.0, 1.8, 1.15, 2.65],
+        "Sub-peer group": [1.65, 1.5, 2.15, 3.15, 1.9, 1.75, 1.2, 2.65],
+        "Peer group": [1.75, 1.7, 3.6, 1.9, 1.75, 1.2, 2.65],
+        "Analyte": [1.85, 2.2, 1.9, 1.75, 1.2, 2.75],
     }
     widths = [value * cm for value in width_map[level]]
     chunks = [displayed.iloc[index:index + 43] for index in range(0, len(displayed), 43)] or [displayed]
@@ -454,7 +475,7 @@ def _draw_table_section(
             for column_index, column in enumerate(columns):
                 left = x + sum(widths[:column_index])
                 value = row[column]
-                text = f"{float(value):.2f}" if column in {"Pooled Bias", "Pooled CV", "TAE"} and pd.notna(value) else str(value)
+                text = f"{float(value):.2f}" if column in {"Pooled Bias (%)", "Pooled CV (%)", "TAE (%)"} and pd.notna(value) else str(value)
                 pdf.setFillColor(text_color if column == "Harmonization Level" else colors.HexColor("#1B2A20"))
                 pdf.drawString(left + 0.07 * cm, y - 0.18 * cm, _ellipsize(pdf, text, widths[column_index]))
             y -= 0.35 * cm
@@ -501,10 +522,10 @@ def generate_pdf_report(
         ("Peer group", peer, "peer-first"),
         ("Analyte", analyte, "analyte-first"),
     )
-    # Match the reference report's reading flow: all three levels for a
-    # period, followed by the three levels for the next period.
-    for period_index, period in enumerate(periods):
-        for level, frame, first_bookmark in levels:
+    # Follow the table of contents: all Year-Surveys for the sub-peer level,
+    # then all peer-level tables, then all analyte-level tables.
+    for level, frame, first_bookmark in levels:
+        for period_index, period in enumerate(periods):
             bookmark = first_bookmark if period_index == 0 else f"{level}-{period}"
             _draw_table_section(pdf, frame, level, str(period), bookmark, page_width, page_height)
             pdf.showPage()
@@ -595,4 +616,9 @@ def analyze_workbook(
     pdf_path = generate_pdf_report(subpeer, peer, analyte, chart_paths, output)
     tables_path = save_tables_excel(subpeer, peer, analyte, coverage, output)
     periods = tuple(sorted(filtered["evaluationPeriod"].unique(), key=_period_key))
-    return AnalysisResult(len(raw), len(filtered), periods, subpeer, peer, analyte, coverage, pdf_path, tables_path, charts_dir)
+    years = tuple(sorted(int(year) for year in raw["year"].unique()))
+    visible_chart_paths = {key: tuple(path for _, path in entries) for key, entries in chart_paths.items()}
+    return AnalysisResult(
+        len(raw), len(filtered), periods, years, subpeer, peer, analyte,
+        coverage, pdf_path, tables_path, charts_dir, visible_chart_paths,
+    )
