@@ -41,11 +41,11 @@ where $IQR = Q_3 - Q_1$. The current HarmoCheck implementation retains a stratum
 
 ### Notation
 
-For PT material $j$ ($j = 1, 2, 3$) in a `Year-Survey` period and sub-peer group $i$:
+For PT material *j* (*j* = 1, 2, 3) in a `Year-Survey` period and sub-peer group *i*:
 
-- $\mathrm{Mean}_{S,i,j}$ and $\mathrm{SD}_{S,i,j}$ are the sub-peer group mean and standard deviation.
-- $n_j$ is the number of sub-peer groups within a peer group for PT material $j$.
-- $N_j$ is the total number of eligible sub-peer groups across all peer groups for PT material $j$.
+- **Mean<sub>S,i,j</sub>** and **SD<sub>S,i,j</sub>** are the sub-peer group mean and standard deviation.
+- **n<sub>j</sub>** is the number of sub-peer groups within a peer group for PT material *j*.
+- **N<sub>j</sub>** is the total number of eligible sub-peer groups across all peer groups for PT material *j*.
 
 ### Assigned value at the peer-group level
 
