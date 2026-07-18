@@ -77,7 +77,11 @@ class HarmoCheckApp(tk.Tk):
         header = ttk.Frame(self, style="Header.TFrame", padding=(30, 20))
         header.pack(fill="x")
         ttk.Label(header, text="HarmoCheck", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(header, text="KEQAS EQA raw data 기반 반기별 Harmonization 평가", style="Subtitle.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(
+            header,
+            text="KEQAS EQA raw data 기반 반기별 Harmonization 평가 자동화 솔루션",
+            style="Subtitle.TLabel",
+        ).pack(anchor="w", pady=(4, 0))
 
         content = ttk.Frame(self, padding=(26, 18))
         content.pack(fill="both", expand=True)
@@ -342,6 +346,22 @@ class HarmoCheckApp(tk.Tk):
             child.destroy()
         self._trend_images.clear()
         self._trend_anchors.clear()
+        # Reserve enough of the visible canvas for the section heading and
+        # spacing so that a complete chart (including its legend) is visible
+        # without having to scroll through that chart itself.
+        self.update_idletasks()
+        # The trend tab is normally not the active tab immediately after an
+        # analysis.  In that case Tk reports a 1-pixel canvas until the user
+        # opens it, so use the mapped notebook dimensions as a reliable
+        # fallback for the initial thumbnail size.
+        viewport_width = self._trend_canvas.winfo_width()
+        viewport_height = self._trend_canvas.winfo_height()
+        if viewport_width < 100 or viewport_height < 100:
+            viewport_width = self.notebook.winfo_width() - 24
+            viewport_height = self.notebook.winfo_height() - 108
+        canvas_width = max(360, viewport_width - 36)
+        canvas_height = max(120, viewport_height - 64)
+        image_bounds = (min(1040, canvas_width), canvas_height)
         names = {"bias": "Bias trend", "cv": "CV trend", "tae": "TAE trend"}
         resample = getattr(Image, "Resampling", Image).LANCZOS
         for metric in ("bias", "cv", "tae"):
@@ -356,7 +376,7 @@ class HarmoCheckApp(tk.Tk):
                 try:
                     with Image.open(chart_path) as source:
                         image = source.convert("RGB")
-                    image.thumbnail((1040, 680), resample)
+                    image.thumbnail(image_bounds, resample)
                     photo = ImageTk.PhotoImage(image)
                     self._trend_images.append(photo)
                     tk.Label(self._trend_frame, image=photo, background=self.CARD, borderwidth=0).pack(anchor="w", pady=(0, 14))
