@@ -66,7 +66,9 @@ class HarmoCheckApp(tk.Tk):
         style.map("Accent.TButton", background=[("active", self.GREEN)], foreground=[("disabled", "#D6E7DB")])
         style.configure("Treeview", background="white", fieldbackground="white", foreground=self.INK, rowheight=28, font=("Malgun Gothic", 9))
         style.configure("Treeview.Heading", background=self.GREEN, foreground="white", font=("Malgun Gothic", 9, "bold"), relief="flat")
-        style.map("Treeview", background=[("selected", "#D7F0E1")], foreground=[("selected", self.INK)])
+        # A selected row must remain clearly distinct from the pale green
+        # "Optimal" category rows.
+        style.map("Treeview", background=[("selected", "#82C39A")], foreground=[("selected", self.INK)])
         style.configure("TNotebook", background=self.BACKGROUND, borderwidth=0)
         style.configure("TNotebook.Tab", background="#DDEBE1", foreground=self.INK, padding=(16, 9), font=("Malgun Gothic", 10, "bold"))
         style.map("TNotebook.Tab", background=[("selected", self.GREEN)], foreground=[("selected", "white")])
@@ -334,7 +336,10 @@ class HarmoCheckApp(tk.Tk):
         if anchor is None:
             return
         self.update_idletasks()
-        content_height = max(1, self._trend_frame.winfo_height() - self._trend_canvas.winfo_height())
+        # Canvas fractions use the entire scrollable content height.  Using
+        # only the remaining scroll distance overshoots CV/TAE and hides each
+        # section title above the visible area.
+        content_height = max(1, self._trend_frame.winfo_height())
         self._trend_canvas.yview_moveto(min(1.0, anchor.winfo_y() / content_height))
 
     def _open_tea_editor(self) -> None:
