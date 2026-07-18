@@ -1,15 +1,10 @@
-"""Calculation and export engine for HarmoCheck.
-
-Each assessment is intentionally limited to the three PT materials distributed
-in one KEQAS EQA semester.  The module has no UI dependencies and can therefore
-also be used in automated validation workflows.
-"""
+"""Calculation, presentation, and export engine for HarmoCheck."""
 
 from __future__ import annotations
 
 import math
-import os
 import re
+from copy import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Optional
@@ -19,12 +14,13 @@ import pandas as pd
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
 
 
 @dataclass(frozen=True)
 class TEaThreshold:
-    """Allowable total error thresholds expressed as percentages."""
+    """Allowable total error thresholds, expressed as percentages."""
 
     optimal: float
     desirable: float
@@ -33,7 +29,7 @@ class TEaThreshold:
 
 @dataclass(frozen=True)
 class AnalysisResult:
-    """Completed calculation data and paths to the generated deliverables."""
+    """Calculation data and paths to the standard output artifacts."""
 
     raw_rows: int
     retained_rows: int
@@ -49,14 +45,34 @@ class AnalysisResult:
 
 HARMONIZATION_LEVELS = ("Optimal", "Desirable", "Minimum", "Not acceptable", "Unknown")
 RAW_COLUMNS = ("year", "qcMaterial", "participant", "analyte", "peerGroup", "subPeerGroup", "result")
-PERIOD_COLUMN_ALIASES = {
-    "semester", "half", "period", "evaluationperiod", "evaluation period",
-    "반기", "평가반기", "평가기간", "조사차수", "차수",
-}
 DEFAULT_TEA: dict[str, TEaThreshold] = {
     "TSH": TEaThreshold(optimal=6.7, desirable=10.0, minimum=20.0),
     "Free T4": TEaThreshold(optimal=5.0, desirable=7.0, minimum=12.0),
     "Total T3": TEaThreshold(optimal=4.0, desirable=6.0, minimum=11.0),
+}
+
+DISPLAY_COLUMNS = {
+    "subpeer": [
+        "evaluationPeriod", "analyte", "peerGroup", "subPeerGroup",
+        "pooledBias", "pooledCv", "tae", "harmonizationLevel",
+    ],
+    "peer": [
+        "evaluationPeriod", "analyte", "peerGroup",
+        "pooledBias", "pooledCv", "tae", "harmonizationLevel",
+    ],
+    "analyte": [
+        "evaluationPeriod", "analyte", "pooledBias", "pooledCv", "tae", "harmonizationLevel",
+    ],
+}
+DISPLAY_RENAMES = {
+    "evaluationPeriod": "Year-Survey",
+    "analyte": "Analyte",
+    "peerGroup": "Peer group",
+    "subPeerGroup": "Sub-peer group",
+    "pooledBias": "Pooled Bias",
+    "pooledCv": "Pooled CV",
+    "tae": "TAE",
+    "harmonizationLevel": "Harmonization Level",
 }
 
 
@@ -84,9 +100,9 @@ def percentile_inc(sorted_values: np.ndarray, percentile: float) -> float:
         return float(sorted_values[0])
     p = min(1.0, max(0.0, percentile / 100.0))
     rank = (n - 1) * p + 1.0
-    k = int(math.floor(rank))
-    d = rank - k
-    return float(sorted_values[k - 1] + d * (sorted_values[min(k, n - 1)] - sorted_values[k - 1]))
+    lower = int(math.floor(rank))
+    fraction = rank - lower
+    return float(sorted_values[lower - 1] + fraction * (sorted_values[min(lower, n - 1)] - sorted_values[lower - 1]))
 
 
 def _normalise_heading(value: object) -> str:
@@ -98,8 +114,8 @@ def _find_column(columns: Iterable[object], aliases: set[str]) -> Optional[objec
     return next((column for column in columns if _normalise_heading(column) in normalised_aliases), None)
 
 
-def _canonicalise_sheet(frame: pd.DataFrame) -> tuple[pd.DataFrame, Optional[str]]:
-    """Return a canonical raw-data frame, or an empty frame for non-raw sheets."""
+def _canonicalise_sheet(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return raw-data columns from a compatible sheet, otherwise an empty frame."""
 
     aliases = {
         "year": {"year", "연도"},
@@ -115,101 +131,81 @@ def _canonicalise_sheet(frame: pd.DataFrame) -> tuple[pd.DataFrame, Optional[str
         out = frame[[mapped[name] for name in RAW_COLUMNS]].copy()
         out.columns = list(RAW_COLUMNS)
     elif frame.shape[1] >= 7:
-        # Compatibility with the supplied legacy workbook: the first seven
-        # columns are the raw-data contract, while later sheets are ignored if
-        # those columns cannot be converted to a valid year/result pair.
+        # Legacy KEQAS workbooks store the raw-data contract in the first
+        # seven columns; derived sheets are discarded if conversion fails.
         out = frame.iloc[:, :7].copy()
         out.columns = list(RAW_COLUMNS)
     else:
-        return pd.DataFrame(columns=list(RAW_COLUMNS)), None
+        return pd.DataFrame(columns=list(RAW_COLUMNS))
 
-    period_column = _find_column(frame.columns, PERIOD_COLUMN_ALIASES)
-    if period_column is not None:
-        out["_semesterSource"] = frame[period_column]
     out["year"] = pd.to_numeric(out["year"], errors="coerce")
     out["result"] = pd.to_numeric(out["result"], errors="coerce")
     for column in ("qcMaterial", "participant", "analyte", "peerGroup", "subPeerGroup"):
         out[column] = out[column].astype("string").fillna("").str.strip()
     out = out.dropna(subset=["year", "result"])
     if out.empty:
-        return pd.DataFrame(columns=list(RAW_COLUMNS)), None
+        return pd.DataFrame(columns=list(RAW_COLUMNS))
     out["year"] = out["year"].astype(int)
-    return out, "_semesterSource" if "_semesterSource" in out else None
-
-
-def _semester_from_value(value: object) -> str:
-    text = str(value).strip().lower().replace(" ", "")
-    if text in {"h2", "2", "2nd", "second", "하반기", "후반기", "2반기"} or "하반" in text or "2" in text:
-        return "H2"
-    if text in {"h1", "1", "1st", "first", "상반기", "전반기", "1반기"} or "상반" in text or "1" in text:
-        return "H1"
-    raise ValueError(f"반기 값을 해석할 수 없습니다: {value!r}. H1/H2 또는 상반기/하반기를 사용하세요.")
+    return out
 
 
 def _natural_key(value: object) -> tuple[object, ...]:
     return tuple(int(piece) if piece.isdigit() else piece.lower() for piece in re.split(r"(\d+)", str(value)))
 
 
-def _attach_evaluation_period(frame: pd.DataFrame, default_semester: str) -> pd.DataFrame:
-    """Attach a ``YYYY-H1/H2`` label and validate the 3-material contract."""
+def _survey_from_material(material: object) -> str:
+    """Derive KEQAS survey A/B from the trailing PT-material number in column B."""
 
-    default_semester = _semester_from_value(default_semester)
+    match = re.search(r"(?:-|_)?(\d+)$", str(material).strip())
+    if match is None:
+        raise ValueError(f"QC material code has no trailing survey number: {material!r}")
+    number = int(match.group(1))
+    if 1 <= number <= 3:
+        return "A"
+    if 4 <= number <= 6:
+        return "B"
+    raise ValueError(
+        f"QC material {material!r} ends in {number}; expected 01-03 for survey A or 04-06 for survey B."
+    )
+
+
+def _attach_evaluation_period(frame: pd.DataFrame) -> pd.DataFrame:
+    """Create ``YYYY-A/B`` assessment labels directly from the QC-material column."""
+
     out = frame.copy()
-    if "_semesterSource" in out:
-        out["semester"] = out["_semesterSource"].map(_semester_from_value)
-        out = out.drop(columns=["_semesterSource"])
-    else:
-        pieces: list[pd.DataFrame] = []
-        for _, group in out.groupby("year", sort=True):
-            materials = sorted(group["qcMaterial"].dropna().unique(), key=_natural_key)
-            if len(materials) == 3:
-                lookup = {material: default_semester for material in materials}
-            elif len(materials) == 6:
-                lookup = {material: "H1" if index < 3 else "H2" for index, material in enumerate(materials)}
-            else:
-                year = int(group["year"].iloc[0])
-                raise ValueError(
-                    f"{year}년 자료에서 PT 물질 {len(materials)}개가 발견되었습니다. "
-                    "반기당 정확히 3개가 필요합니다. 반기 열(H1/H2)을 추가하거나 3개 물질만 포함한 파일을 사용하세요."
-                )
-            copy = group.copy()
-            copy["semester"] = copy["qcMaterial"].map(lookup)
-            pieces.append(copy)
-        out = pd.concat(pieces, ignore_index=True)
-
-    out["evaluationPeriod"] = out["year"].astype(str) + "-" + out["semester"]
+    out["survey"] = out["qcMaterial"].map(_survey_from_material)
+    out["evaluationPeriod"] = out["year"].astype(str) + "-" + out["survey"]
     period_counts = out.groupby("evaluationPeriod")["qcMaterial"].nunique()
     invalid = period_counts[period_counts != 3]
     if not invalid.empty:
-        detail = ", ".join(f"{period} ({count}개)" for period, count in invalid.items())
-        raise ValueError(f"각 반기 평가에는 PT 물질이 정확히 3개 있어야 합니다: {detail}")
+        detail = ", ".join(f"{period} ({count} materials)" for period, count in invalid.items())
+        raise ValueError(f"Each Year-Survey assessment must contain exactly three PT materials: {detail}")
     return out
 
 
-def load_all_sheets(xlsx_path: str | Path, default_semester: str = "H1") -> pd.DataFrame:
-    """Read every compatible raw-data sheet and assign its evaluation semester."""
+def load_all_sheets(xlsx_path: str | Path) -> pd.DataFrame:
+    """Read compatible raw-data worksheets and derive A/B from column B material codes."""
 
     try:
         workbook = pd.ExcelFile(xlsx_path)
     except Exception as exc:
-        raise RuntimeError(f"Excel 파일을 열 수 없습니다: {exc}") from exc
+        raise RuntimeError(f"Unable to open Excel workbook: {exc}") from exc
+
     frames: list[pd.DataFrame] = []
     try:
         for sheet in workbook.sheet_names:
-            frame, _ = _canonicalise_sheet(workbook.parse(sheet_name=sheet, header=0))
+            frame = _canonicalise_sheet(workbook.parse(sheet_name=sheet, header=0))
             if not frame.empty:
                 frames.append(frame)
     finally:
-        # Explicitly release the workbook; otherwise Windows keeps the input
-        # .xlsx locked after an analysis finishes.
         workbook.close()
     if not frames:
-        raise RuntimeError("유효한 raw data를 찾지 못했습니다. Year~Result의 7개 열을 확인하세요.")
-    return _attach_evaluation_period(pd.concat(frames, ignore_index=True), default_semester)
+        raise RuntimeError("No valid raw data found. Check the Year through Result columns.")
+    return _attach_evaluation_period(pd.concat(frames, ignore_index=True))
 
 
 def apply_tukey_and_min_participants(frame: pd.DataFrame) -> pd.DataFrame:
-    """Apply Tukey outlier exclusion, n>=10, and complete 3-material coverage."""
+    """Apply Tukey exclusion, n>=10, and complete 3-material analyte coverage."""
 
     key_columns = ["evaluationPeriod", "qcMaterial", "analyte", "peerGroup", "subPeerGroup"]
     retained: list[pd.DataFrame] = []
@@ -226,7 +222,6 @@ def apply_tukey_and_min_participants(frame: pd.DataFrame) -> pd.DataFrame:
         return frame.iloc[0:0].copy()
     out = pd.concat(retained, ignore_index=True)
 
-    # A semestral result must reflect all three PT materials for the analyte.
     coverage = out.groupby(["evaluationPeriod", "analyte"])["qcMaterial"].nunique()
     complete = coverage[coverage == 3].index
     return out.set_index(["evaluationPeriod", "analyte"]).loc[
@@ -243,7 +238,7 @@ def compute_subpeer_survey_stats(frame: pd.DataFrame) -> pd.DataFrame:
     out = out.join(peer_means, on=peer_key)
     out["bias"] = np.where(
         out["peerMean"].notna() & out["peerMean"].ne(0),
-        (out["mean"].sub(out["peerMean"]).div(out["peerMean"]).abs() * 100),
+        out["mean"].sub(out["peerMean"]).div(out["peerMean"]).abs() * 100,
         np.nan,
     )
     return out.drop(columns="peerMean")
@@ -289,132 +284,275 @@ def _add_metadata(summary: pd.DataFrame, raw: pd.DataFrame, tea_map: Mapping[str
     return out
 
 
-def _period_key(period: str) -> tuple[int, int, str]:
-    match = re.match(r"^(\d{4})-H([12])$", str(period))
-    return (int(match.group(1)), int(match.group(2)), str(period)) if match else (9999, 9, str(period))
+def _period_key(period: object) -> tuple[int, int, str]:
+    match = re.match(r"^(\d{4})-([AB])$", str(period))
+    return (int(match.group(1)), 0 if match.group(2) == "A" else 1, str(period)) if match else (9999, 9, str(period))
 
 
-def generate_trend_charts(subpeer: pd.DataFrame, peer: pd.DataFrame, analyte: pd.DataFrame, output_dir: Path) -> None:
-    """Create categorical semestral trends for TAE, bias and CV."""
+def display_table(frame: pd.DataFrame, level: str) -> pd.DataFrame:
+    """Return a user-facing level table with the requested columns and headings only."""
+
+    if level not in DISPLAY_COLUMNS:
+        raise ValueError(f"Unknown display level: {level}")
+    out = frame.loc[:, DISPLAY_COLUMNS[level]].copy()
+    out = out.sort_values(["evaluationPeriod", "analyte"], key=lambda series: series.map(_period_key) if series.name == "evaluationPeriod" else series, kind="stable")
+    return out.rename(columns=DISPLAY_RENAMES)
+
+
+def display_coverage(frame: pd.DataFrame) -> pd.DataFrame:
+    """Show only assessment validation information in the UI and Excel workbook."""
+
+    out = frame.loc[:, ["evaluationPeriod", "analyte", "PT_material_count"]].copy()
+    out = out.sort_values(["evaluationPeriod", "analyte"], key=lambda series: series.map(_period_key) if series.name == "evaluationPeriod" else series, kind="stable")
+    return out.rename(columns={"evaluationPeriod": "Year-Survey", "analyte": "Analyte", "PT_material_count": "PT Material Count"})
+
+
+def generate_trend_charts(peer: pd.DataFrame, analyte: pd.DataFrame, output_dir: Path) -> dict[str, list[tuple[str, Path]]]:
+    """Create Java-report-style peer and analyte trend charts for each analyte."""
 
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    definitions = (
+        ("bias", "pooledBias", "Pooled Bias (%)"),
+        ("cv", "pooledCv", "Pooled CV (%)"),
+        ("tae", "tae", "TAE (%)"),
+    )
+    results: dict[str, list[tuple[str, Path]]] = {key: [] for key, _, _ in definitions}
+    colors_cycle = ("#D81B60", "#FB8C00", "#0B8F3A", "#1E88E5", "#7B1FA2", "#00897B", "#6D4C41")
 
-    def draw(frame: pd.DataFrame, metric: str, title: str, prefix: str, groups: list[str]) -> None:
-        groupby = ["analyte", *groups]
-        for keys, group in frame.groupby(groupby, sort=False):
-            if not isinstance(keys, tuple):
-                keys = (keys,)
-            group = group.sort_values("evaluationPeriod", key=lambda s: s.map(_period_key))
-            labels = group["evaluationPeriod"].tolist()
-            label = " | ".join(str(item) for item in keys[1:]) or "All groups"
-            figure, axis = plt.subplots(figsize=(7.2, 4.2))
-            axis.plot(labels, group[metric], marker="o", linewidth=2.2, color="#118a54")
-            axis.set_title(f"{title} - {keys[0]}\n{label}", fontweight="bold")
-            axis.set_xlabel("Evaluation period (semester)")
-            axis.set_ylabel(metric)
-            axis.grid(axis="y", alpha=0.25)
-            figure.tight_layout()
-            safe = re.sub(r"[^A-Za-z0-9_-]+", "_", "_".join(map(str, keys)))
-            figure.savefig(output_dir / f"{prefix}_{safe}.png", dpi=170)
+    for chart_key, metric, ylabel in definitions:
+        for analyte_name in sorted(analyte["analyte"].dropna().unique(), key=str):
+            peer_rows = peer[peer["analyte"].eq(analyte_name)].copy()
+            analyte_rows = analyte[analyte["analyte"].eq(analyte_name)].copy()
+            periods = sorted(set(peer_rows["evaluationPeriod"]).union(analyte_rows["evaluationPeriod"]), key=_period_key)
+            if not periods:
+                continue
+            figure, axis = plt.subplots(figsize=(10.2, 6.2))
+            for index, (peer_name, group) in enumerate(peer_rows.groupby("peerGroup", sort=True)):
+                values = group.set_index("evaluationPeriod")[metric].reindex(periods)
+                axis.plot(periods, values, marker="o", linewidth=2, markersize=5, color=colors_cycle[index % len(colors_cycle)], label=str(peer_name))
+            values = analyte_rows.set_index("evaluationPeriod")[metric].reindex(periods)
+            axis.plot(periods, values, marker="o", linewidth=2.6, markersize=5, color="#111111", label="Analyte level")
+            axis.set_title(f"Semestral {ylabel.replace(' (%)', '')} Trend of {analyte_name}", fontsize=16, fontweight="bold", pad=14)
+            axis.set_xlabel("Year-Survey", fontsize=11, fontweight="bold")
+            axis.set_ylabel(ylabel, fontsize=11, fontweight="bold")
+            axis.grid(True, linestyle="--", linewidth=0.7, alpha=0.65)
+            axis.set_axisbelow(True)
+            axis.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, frameon=False, fontsize=9)
+            figure.subplots_adjust(left=0.11, right=0.96, top=0.88, bottom=0.22)
+            safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(analyte_name)).strip("_")
+            path = output_dir / f"{chart_key.title()}_Trend_{safe_name}.png"
+            figure.savefig(path, dpi=190)
             plt.close(figure)
-
-    for metric, label in (("tae", "TAE"), ("pooledBias", "Bias"), ("pooledCv", "CV")):
-        draw(subpeer, metric, f"{label} trend (sub-peer pooled)", f"{metric}_SubPeer", ["peerGroup", "subPeerGroup"])
-        draw(peer, metric, f"{label} trend (peer pooled)", f"{metric}_Peer", ["peerGroup"])
-        draw(analyte, metric, f"{label} trend (analyte pooled)", f"{metric}_Analyte", [])
+            results[chart_key].append((str(analyte_name), path))
+    return results
 
 
-def _draw_summary_table(pdf: canvas.Canvas, frame: pd.DataFrame, title: str, page_height: float, page_width: float) -> None:
-    columns = ["evaluationPeriod", "analyte", "peerGroup", "subPeerGroup", "pooledBias", "pooledCv", "tae", "harmonizationLevel"]
-    columns = [column for column in columns if column in frame.columns]
-    widths = [2.0, 2.2, 2.6, 2.6, 1.45, 1.45, 1.1, 2.0][: len(columns)]
-    widths = [width * cm for width in widths]
-    x = 1.5 * cm
-    y = page_height - 3.2 * cm
-    pdf.setFont("Helvetica-Bold", 11)
-    pdf.setFillColor(colors.HexColor("#0C5B38"))
-    pdf.drawString(x, y, title)
-    y -= 0.55 * cm
-    pdf.setFillColor(colors.white)
-    pdf.setStrokeColor(colors.HexColor("#0C5B38"))
-    pdf.setFillColor(colors.HexColor("#0C5B38"))
-    for index, column in enumerate(columns):
-        pdf.rect(x + sum(widths[:index]), y - 0.38 * cm, widths[index], 0.42 * cm, fill=1, stroke=0)
-        pdf.setFillColor(colors.white)
-        pdf.setFont("Helvetica-Bold", 6.6)
-        pdf.drawString(x + sum(widths[:index]) + 0.07 * cm, y - 0.22 * cm, column)
-    y -= 0.5 * cm
-    pdf.setFont("Helvetica", 6.6)
-    for row_index, (_, row) in enumerate(frame.sort_values(["evaluationPeriod", "analyte"]).head(42).iterrows()):
-        if y < 1.8 * cm:
-            pdf.showPage()
-            _report_header(pdf, page_width, page_height, "HarmoCheck report (continued)")
-            y = page_height - 3.2 * cm
-        if row_index % 2 == 0:
-            pdf.setFillColor(colors.HexColor("#EEF8F1"))
-            pdf.rect(x, y - 0.29 * cm, sum(widths), 0.34 * cm, fill=1, stroke=0)
-        pdf.setFillColor(colors.HexColor("#1E2B23"))
-        for index, column in enumerate(columns):
-            value = row[column]
-            text = f"{float(value):.3f}" if column in {"pooledBias", "pooledCv", "tae"} and pd.notna(value) else str(value)
-            pdf.drawString(x + sum(widths[:index]) + 0.07 * cm, y - 0.18 * cm, text[:25])
-        y -= 0.36 * cm
-
-
-def _report_header(pdf: canvas.Canvas, page_width: float, page_height: float, title: str) -> None:
+def _report_header(pdf: canvas.Canvas, page_width: float, page_height: float) -> None:
     pdf.setFillColor(colors.HexColor("#0C5B38"))
     pdf.rect(0, page_height - 1.45 * cm, page_width, 1.45 * cm, fill=1, stroke=0)
     pdf.setFillColor(colors.white)
     pdf.setFont("Helvetica-Bold", 16)
-    pdf.drawString(1.5 * cm, page_height - 0.92 * cm, title)
+    pdf.drawString(1.5 * cm, page_height - 0.92 * cm, "HarmoCheck")
     pdf.setFont("Helvetica", 8.5)
     pdf.drawRightString(page_width - 1.5 * cm, page_height - 0.92 * cm, "Semestral assessment | 3 PT materials per period")
 
 
-def generate_pdf_report(subpeer: pd.DataFrame, peer: pd.DataFrame, analyte: pd.DataFrame, tea_map: Mapping[str, TEaThreshold], output_dir: Path) -> Path:
+def _link_text(pdf: canvas.Canvas, text: str, destination: str, x: float, y: float, bold: bool = False) -> float:
+    font = "Helvetica-Bold" if bold else "Helvetica"
+    size = 11.5 if bold else 10.5
+    pdf.setFont(font, size)
+    pdf.setFillColor(colors.HexColor("#123D29"))
+    pdf.drawString(x, y, text)
+    width = stringWidth(text, font, size)
+    pdf.linkAbsolute("", destination, Rect=(x, y - 2, x + width, y + size), thickness=0)
+    return y - (0.72 * cm if bold else 0.55 * cm)
+
+
+def _draw_contents(pdf: canvas.Canvas, page_width: float, page_height: float) -> None:
+    _report_header(pdf, page_width, page_height)
+    x, y = 1.7 * cm, page_height - 3.0 * cm
+    pdf.setFillColor(colors.HexColor("#123D29"))
+    pdf.setFont("Helvetica-Bold", 24)
+    pdf.drawString(x, y, "Contents")
+    y -= 1.0 * cm
+    y = _link_text(pdf, "1. Nationwide Harmonization Evaluation Results", "subpeer-first", x, y, bold=True)
+    y = _link_text(pdf, "(1) Sub-peer group level", "subpeer-first", x + 0.55 * cm, y)
+    y = _link_text(pdf, "(2) Peer group level", "peer-first", x + 0.55 * cm, y)
+    y = _link_text(pdf, "(3) Analyte level", "analyte-first", x + 0.55 * cm, y)
+    y -= 0.45 * cm
+    y = _link_text(pdf, "2. Trends in Harmonization", "trend-bias-first", x, y, bold=True)
+    y = _link_text(pdf, "(1) Bias Trend", "trend-bias-first", x + 0.55 * cm, y)
+    y = _link_text(pdf, "(2) CV Trend", "trend-cv-first", x + 0.55 * cm, y)
+    _link_text(pdf, "(3) TAE Trend", "trend-tae-first", x + 0.55 * cm, y)
+
+
+def _ellipsize(pdf: canvas.Canvas, value: object, width: float, font: str = "Helvetica", size: float = 6.7) -> str:
+    text = str(value)
+    if stringWidth(text, font, size) <= width - 0.12 * cm:
+        return text
+    suffix = "..."
+    while text and stringWidth(text + suffix, font, size) > width - 0.12 * cm:
+        text = text[:-1]
+    return text + suffix
+
+
+def _draw_table_section(
+    pdf: canvas.Canvas,
+    frame: pd.DataFrame,
+    level: str,
+    period: str,
+    first_bookmark: str,
+    page_width: float,
+    page_height: float,
+) -> None:
+    title = f"Nationwide Harmonization Evaluation at {level} level (Year-Survey: {period})"
+    displayed = display_table(frame[frame["evaluationPeriod"].eq(period)], {"Sub-peer group": "subpeer", "Peer group": "peer", "Analyte": "analyte"}[level])
+    columns = list(displayed.columns)
+    width_map = {
+        "Sub-peer group": [1.65, 1.5, 2.25, 3.55, 1.65, 1.55, 1.05, 2.3],
+        "Peer group": [1.75, 1.7, 3.9, 1.75, 1.6, 1.1, 2.45],
+        "Analyte": [1.85, 2.2, 2.0, 1.8, 1.15, 2.65],
+    }
+    widths = [value * cm for value in width_map[level]]
+    chunks = [displayed.iloc[index:index + 43] for index in range(0, len(displayed), 43)] or [displayed]
+    for index, chunk in enumerate(chunks):
+        if index:
+            pdf.showPage()
+        _report_header(pdf, page_width, page_height)
+        if index == 0:
+            pdf.bookmarkPage(first_bookmark)
+        x, y = 1.45 * cm, page_height - 2.35 * cm
+        pdf.setFillColor(colors.HexColor("#123D29"))
+        pdf.setFont("Helvetica-Bold", 11.5)
+        pdf.drawString(x, y, title if index == 0 else f"{title} (continued)")
+        y -= 0.57 * cm
+        for column_index, column in enumerate(columns):
+            left = x + sum(widths[:column_index])
+            pdf.setFillColor(colors.HexColor("#0C5B38"))
+            pdf.rect(left, y - 0.39 * cm, widths[column_index], 0.45 * cm, fill=1, stroke=0)
+            pdf.setFillColor(colors.white)
+            pdf.setFont("Helvetica-Bold", 6.3)
+            pdf.drawString(left + 0.07 * cm, y - 0.23 * cm, _ellipsize(pdf, column, widths[column_index], "Helvetica-Bold", 6.3))
+        y -= 0.48 * cm
+        pdf.setFont("Helvetica", 6.7)
+        for row_index, (_, row) in enumerate(chunk.iterrows()):
+            if row_index % 2 == 0:
+                pdf.setFillColor(colors.HexColor("#F0F8F3"))
+                pdf.rect(x, y - 0.285 * cm, sum(widths), 0.34 * cm, fill=1, stroke=0)
+            level_value = str(row.get("Harmonization Level", ""))
+            if level_value == "Not acceptable":
+                text_color = colors.HexColor("#A51D1D")
+            elif level_value == "Optimal":
+                text_color = colors.HexColor("#0C5B38")
+            else:
+                text_color = colors.HexColor("#1B2A20")
+            for column_index, column in enumerate(columns):
+                left = x + sum(widths[:column_index])
+                value = row[column]
+                text = f"{float(value):.2f}" if column in {"Pooled Bias", "Pooled CV", "TAE"} and pd.notna(value) else str(value)
+                pdf.setFillColor(text_color if column == "Harmonization Level" else colors.HexColor("#1B2A20"))
+                pdf.drawString(left + 0.07 * cm, y - 0.18 * cm, _ellipsize(pdf, text, widths[column_index]))
+            y -= 0.35 * cm
+
+
+def _draw_chart_page(
+    pdf: canvas.Canvas,
+    chart_path: Path,
+    chart_title: str,
+    bookmark: Optional[str],
+    page_width: float,
+    page_height: float,
+) -> None:
+    _report_header(pdf, page_width, page_height)
+    if bookmark:
+        pdf.bookmarkPage(bookmark)
+    pdf.setFillColor(colors.HexColor("#123D29"))
+    pdf.setFont("Helvetica-Bold", 12)
+    pdf.drawString(1.45 * cm, page_height - 2.25 * cm, chart_title)
+    image_width = page_width - 2.9 * cm
+    image_height = page_height - 4.4 * cm
+    pdf.drawImage(str(chart_path), 1.45 * cm, 1.4 * cm, width=image_width, height=image_height, preserveAspectRatio=True, anchor="c", mask="auto")
+
+
+def generate_pdf_report(
+    subpeer: pd.DataFrame,
+    peer: pd.DataFrame,
+    analyte: pd.DataFrame,
+    chart_paths: Mapping[str, list[tuple[str, Path]]],
+    output_dir: Path,
+) -> Path:
+    """Write a linked table-of-contents report with level tables and trend charts."""
+
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "HarmoCheck_Report.pdf"
-    pdf = canvas.Canvas(str(path), pagesize=A4)
-    width, height = A4
-    _report_header(pdf, width, height, "HarmoCheck")
-    pdf.setFillColor(colors.HexColor("#12321F"))
-    pdf.setFont("Helvetica-Bold", 14)
-    pdf.drawString(1.5 * cm, height - 2.55 * cm, "Harmonization assessment report")
-    pdf.setFont("Helvetica", 9.2)
-    pdf.drawString(1.5 * cm, height - 3.15 * cm, "Assessment rule: each result pools exactly three PT materials from one EQA semester.")
-    pdf.setFont("Helvetica-Bold", 10)
-    pdf.drawString(1.5 * cm, height - 4.05 * cm, "TEa thresholds used")
-    y = height - 4.6 * cm
-    pdf.setFont("Helvetica", 9)
-    for analyte_name, threshold in tea_map.items():
-        pdf.drawString(1.7 * cm, y, f"{analyte_name}: Optimal {threshold.optimal:.2f}% | Desirable {threshold.desirable:.2f}% | Minimum {threshold.minimum:.2f}%")
-        y -= 0.48 * cm
-    pdf.setFillColor(colors.HexColor("#5A6B60"))
-    pdf.setFont("Helvetica-Oblique", 8)
-    pdf.drawString(1.5 * cm, 2.0 * cm, "Unknown means a TEa threshold has not yet been configured for the analyte.")
-    for frame, title in ((subpeer, "Sub-peer pooled summary"), (peer, "Peer pooled summary"), (analyte, "Analyte pooled summary")):
-        pdf.showPage()
-        _report_header(pdf, width, height, "HarmoCheck")
-        _draw_summary_table(pdf, frame, title, height, width)
+    pdf = canvas.Canvas(str(path), pagesize=A4, pageCompression=1)
+    page_width, page_height = A4
+    _draw_contents(pdf, page_width, page_height)
+    pdf.showPage()
+
+    periods = sorted(analyte["evaluationPeriod"].dropna().unique(), key=_period_key)
+    levels = (
+        ("Sub-peer group", subpeer, "subpeer-first"),
+        ("Peer group", peer, "peer-first"),
+        ("Analyte", analyte, "analyte-first"),
+    )
+    # Match the reference report's reading flow: all three levels for a
+    # period, followed by the three levels for the next period.
+    for period_index, period in enumerate(periods):
+        for level, frame, first_bookmark in levels:
+            bookmark = first_bookmark if period_index == 0 else f"{level}-{period}"
+            _draw_table_section(pdf, frame, level, str(period), bookmark, page_width, page_height)
+            pdf.showPage()
+
+    chart_titles = {"bias": "Bias Trend", "cv": "CV Trend", "tae": "TAE Trend"}
+    for chart_key in ("bias", "cv", "tae"):
+        entries = chart_paths.get(chart_key, [])
+        for index, (analyte_name, chart_path) in enumerate(entries):
+            _draw_chart_page(
+                pdf,
+                chart_path,
+                f"{chart_titles[chart_key]} - {analyte_name}",
+                f"trend-{chart_key}-first" if index == 0 else None,
+                page_width,
+                page_height,
+            )
+            if not (chart_key == "tae" and index == len(entries) - 1):
+                pdf.showPage()
     pdf.save()
     return path
 
 
 def save_tables_excel(subpeer: pd.DataFrame, peer: pd.DataFrame, analyte: pd.DataFrame, coverage: pd.DataFrame, output_dir: Path) -> Path:
+    """Save user-facing labels and omit internal PT-material metadata columns."""
+
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "HarmoCheck_Tables.xlsx"
+    tables = (
+        ("SurveyValidation", display_coverage(coverage)),
+        ("SubPeerGroupLevel", display_table(subpeer, "subpeer")),
+        ("PeerGroupLevel", display_table(peer, "peer")),
+        ("AnalyteLevel", display_table(analyte, "analyte")),
+    )
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        coverage.to_excel(writer, sheet_name="Coverage", index=False)
-        subpeer.to_excel(writer, sheet_name="SubPeerPooled", index=False)
-        peer.to_excel(writer, sheet_name="PeerPooled", index=False)
-        analyte.to_excel(writer, sheet_name="AnalytePooled", index=False)
+        for sheet_name, table in tables:
+            table.to_excel(writer, sheet_name=sheet_name, index=False)
         for sheet in writer.book.worksheets:
             sheet.freeze_panes = "A2"
             sheet.auto_filter.ref = sheet.dimensions
+            for cell in sheet[1]:
+                font = copy(cell.font)
+                font.bold = True
+                font.color = "FFFFFF"
+                cell.font = font
+                fill = copy(cell.fill)
+                fill.fill_type = "solid"
+                fill.fgColor.rgb = "FF0C5B38"
+                cell.fill = fill
             for column in sheet.columns:
                 letter = column[0].column_letter
                 width = min(40, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
@@ -426,15 +564,14 @@ def analyze_workbook(
     xlsx_path: str | Path,
     output_dir: str | Path,
     tea_map: Optional[Mapping[str, TEaThreshold]] = None,
-    default_semester: str = "H1",
     generate_charts: bool = True,
 ) -> AnalysisResult:
-    """Run the complete semestral assessment and write the standard outputs."""
+    """Run the complete semestral assessment, exports, and linked report generation."""
 
-    raw = load_all_sheets(xlsx_path, default_semester=default_semester)
+    raw = load_all_sheets(xlsx_path)
     filtered = apply_tukey_and_min_participants(raw)
     if filtered.empty:
-        raise RuntimeError("Tukey 이상치 제외와 기관 수(n>=10) 조건 후 남은 완전한 3-PT 평가 자료가 없습니다.")
+        raise RuntimeError("No complete 3-PT assessment data remain after Tukey and n>=10 filtering.")
     subpeer_stats = compute_subpeer_survey_stats(filtered)
     thresholds = dict(DEFAULT_TEA if tea_map is None else tea_map)
     subpeer = _add_metadata(compute_subpeer_pooled(subpeer_stats), filtered, thresholds)
@@ -447,11 +584,15 @@ def analyze_workbook(
     )
     output = Path(output_dir)
     charts_dir = output / "TrendCharts"
-    if generate_charts:
-        generate_trend_charts(subpeer, peer, analyte, charts_dir)
-    else:
+    chart_paths = generate_trend_charts(peer, analyte, charts_dir)
+    if not generate_charts:
+        # Keep report charts available; the flag only controls the optional
+        # standalone chart directory after report generation.
+        for chart_file in charts_dir.glob("*.png"):
+            chart_file.unlink()
         charts_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = generate_pdf_report(subpeer, peer, analyte, thresholds, output)
+        chart_paths = generate_trend_charts(peer, analyte, charts_dir)
+    pdf_path = generate_pdf_report(subpeer, peer, analyte, chart_paths, output)
     tables_path = save_tables_excel(subpeer, peer, analyte, coverage, output)
     periods = tuple(sorted(filtered["evaluationPeriod"].unique(), key=_period_key))
     return AnalysisResult(len(raw), len(filtered), periods, subpeer, peer, analyte, coverage, pdf_path, tables_path, charts_dir)

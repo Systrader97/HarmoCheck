@@ -2,7 +2,7 @@
 
 Harmonization evaluation tool based on KEQAS EQA.
 
-**HarmoCheck** is a Windows desktop application for semestral harmonization assessment using Korean External Quality Assessment Scheme (KEQAS EQA) raw data. It assesses each `year-semester` period with the **three PT materials distributed for that semester**.
+**HarmoCheck** is a Windows desktop application for semestral harmonization assessment using Korean External Quality Assessment Scheme (KEQAS EQA) raw data. It assesses each `Year-Survey` period with the **three PT materials distributed for that survey**.
 
 ## What it does
 
@@ -13,9 +13,9 @@ Harmonization evaluation tool based on KEQAS EQA.
 - Exports an Excel table workbook, PDF report and semestral trend charts.
 - Provides a green local Windows UI. Selected data are processed only on the local computer.
 
-## Semestral data handling
+## Survey data handling
 
-Use an explicit `Semester` column whenever a workbook contains more than one period. Values such as `H1`, `H2`, first semester, and second semester are supported. For a workbook containing one three-material semester, select its semester in the UI. If a single year has six materials and no semester column, HarmoCheck assigns the first three material codes to H1 and the next three to H2.
+HarmoCheck derives the survey directly from the trailing material number in the QC material column: `01` to `03` are survey `A`, and `04` to `06` are survey `B`. A valid Year-Survey period must contain exactly three PT materials.
 
 The program will not publish a harmonization result for an incomplete period; every eligible analyte must have all three PT materials after filtering.
 

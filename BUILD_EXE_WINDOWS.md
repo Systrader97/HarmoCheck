@@ -17,4 +17,4 @@ The raw-data worksheet must contain these seven fields (the supplied English hea
 
 `Year`, `QC material`, `Participant`, `Analyte`, `Peer group`, `Sub-peer group`, `Result`
 
-Optionally include `Semester`/`반기` with H1/H2 (or 상반기/하반기). Each evaluation period must include exactly three PT materials. If a semester column is absent, the UI selection is applied to a 3-material file. A 6-material year is split into the first and second three material codes automatically.
+HarmoCheck derives the survey from the trailing number in `QC material`: codes ending in `01` to `03` become survey `A`, and those ending in `04` to `06` become survey `B`. Each Year-Survey assessment must include exactly three PT materials.

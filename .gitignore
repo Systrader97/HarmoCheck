@@ -11,8 +11,10 @@ TrendCharts/
 HarmoCheck_Report.pdf
 HarmoCheck_Tables.xlsx
 validation-output/
+validation-output-v2/
 docx-work/
 deliverables/
 scripts/
+tmp/
 *.xlsx
 !tests/**/*.xlsx

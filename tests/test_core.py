@@ -7,8 +7,8 @@ import pandas as pd
 from harmocheck.core import (
     TEaThreshold,
     analyze_workbook,
-    apply_tukey_and_min_participants,
     classify_tae,
+    display_table,
     load_all_sheets,
 )
 
@@ -31,11 +31,11 @@ def synthetic_raw(materials, year=2026):
     return pd.DataFrame(rows)
 
 
-def test_three_material_file_uses_selected_semester(tmp_path):
+def test_three_material_file_uses_material_code_survey(tmp_path):
     workbook = tmp_path / "three_pt.xlsx"
-    synthetic_raw(["CH5-26-01", "CH5-26-02", "CH5-26-03"]).to_excel(workbook, index=False)
-    loaded = load_all_sheets(workbook, default_semester="H2")
-    assert set(loaded["evaluationPeriod"]) == {"2026-H2"}
+    synthetic_raw(["CH5-26-04", "CH5-26-05", "CH5-26-06"]).to_excel(workbook, index=False)
+    loaded = load_all_sheets(workbook)
+    assert set(loaded["evaluationPeriod"]) == {"2026-B"}
     assert loaded["qcMaterial"].nunique() == 3
 
 
@@ -43,8 +43,8 @@ def test_six_material_file_is_split_into_two_semesters(tmp_path):
     workbook = tmp_path / "six_pt.xlsx"
     synthetic_raw([f"CH5-26-{number:02d}" for number in range(1, 7)]).to_excel(workbook, index=False)
     loaded = load_all_sheets(workbook)
-    assert set(loaded["evaluationPeriod"]) == {"2026-H1", "2026-H2"}
-    assert loaded.groupby("evaluationPeriod")["qcMaterial"].nunique().to_dict() == {"2026-H1": 3, "2026-H2": 3}
+    assert set(loaded["evaluationPeriod"]) == {"2026-A", "2026-B"}
+    assert loaded.groupby("evaluationPeriod")["qcMaterial"].nunique().to_dict() == {"2026-A": 3, "2026-B": 3}
 
 
 def test_analysis_requires_complete_three_material_coverage(tmp_path):
@@ -52,7 +52,7 @@ def test_analysis_requires_complete_three_material_coverage(tmp_path):
     raw = synthetic_raw(["CH5-26-01", "CH5-26-02", "CH5-26-03"])
     raw = raw[raw["QC material"] != "CH5-26-03"]
     raw.to_excel(workbook, index=False)
-    with unittest.TestCase().assertRaisesRegex(ValueError, "PT 물질 2개"):
+    with unittest.TestCase().assertRaisesRegex(ValueError, "2 materials"):
         load_all_sheets(workbook)
 
 
@@ -60,10 +60,16 @@ def test_end_to_end_creates_semestral_outputs(tmp_path):
     workbook = tmp_path / "raw.xlsx"
     synthetic_raw(["CH5-26-01", "CH5-26-02", "CH5-26-03"]).to_excel(workbook, index=False)
     result = analyze_workbook(workbook, tmp_path / "output", tea_map={"TSH": TEaThreshold(5, 10, 15)}, generate_charts=False)
-    assert result.periods == ("2026-H1",)
+    assert result.periods == ("2026-A",)
     assert set(result.analyte["ptMaterialCount"]) == {3}
     assert result.pdf_path.is_file()
     assert result.tables_path.is_file()
+    displayed = display_table(result.subpeer, "subpeer")
+    assert list(displayed.columns) == [
+        "Year-Survey", "Analyte", "Peer group", "Sub-peer group",
+        "Pooled Bias", "Pooled CV", "TAE", "Harmonization Level",
+    ]
+    assert "ptMaterials" not in displayed.columns
 
 
 def test_harmonization_categories():
@@ -79,8 +85,8 @@ class HarmoCheckCoreTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         return Path(directory.name)
 
-    def test_three_material_file_uses_selected_semester(self):
-        test_three_material_file_uses_selected_semester(self._tmp_path())
+    def test_three_material_file_uses_material_code_survey(self):
+        test_three_material_file_uses_material_code_survey(self._tmp_path())
 
     def test_six_material_file_is_split_into_two_semesters(self):
         test_six_material_file_is_split_into_two_semesters(self._tmp_path())
