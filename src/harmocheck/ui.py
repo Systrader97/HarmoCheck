@@ -160,6 +160,12 @@ class HarmoCheckApp(tk.Tk):
         self._trend_window = self._trend_canvas.create_window((0, 0), window=self._trend_frame, anchor="nw")
         self._trend_frame.bind("<Configure>", self._refresh_trend_scrollregion)
         self._trend_canvas.bind("<Configure>", self._resize_trend_frame)
+        # Mouse-wheel events are delivered to chart labels as well as the
+        # canvas itself, so bind at the application level and scroll only
+        # while the pointer is over the trend viewport.
+        self.bind_all("<MouseWheel>", self._on_trend_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_trend_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_trend_mousewheel, add="+")
         self._clear_trends()
 
     def _refresh_trend_scrollregion(self, _event: tk.Event | None = None) -> None:
@@ -167,6 +173,37 @@ class HarmoCheckApp(tk.Tk):
 
     def _resize_trend_frame(self, event: tk.Event) -> None:
         self._trend_canvas.itemconfigure(self._trend_window, width=event.width)
+
+    def _pointer_is_over_trend_canvas(self) -> bool:
+        pointer_x, pointer_y = self.winfo_pointerx(), self.winfo_pointery()
+        left, top = self._trend_canvas.winfo_rootx(), self._trend_canvas.winfo_rooty()
+        return left <= pointer_x < left + self._trend_canvas.winfo_width() and top <= pointer_y < top + self._trend_canvas.winfo_height()
+
+    def _on_trend_mousewheel(self, event: tk.Event) -> str | None:
+        if not self._pointer_is_over_trend_canvas():
+            return None
+        delta = getattr(event, "delta", 0)
+        if delta:
+            steps = max(1, abs(int(delta / 120)))
+            self._scroll_trend_by_pixels(-steps if delta > 0 else steps)
+        elif getattr(event, "num", None) == 4:
+            self._scroll_trend_by_pixels(-1)
+        elif getattr(event, "num", None) == 5:
+            self._scroll_trend_by_pixels(1)
+        return "break"
+
+    def _scroll_trend_by_pixels(self, direction: int) -> None:
+        """Scroll the graph canvas by a reliable fixed pixel distance."""
+
+        bounds = self._trend_canvas.bbox("all")
+        if bounds is None:
+            return
+        _left, top, _right, bottom = bounds
+        content_height = max(1, bottom - top)
+        viewport_height = self._trend_canvas.winfo_height()
+        current_top = self._trend_canvas.canvasy(0)
+        target_top = max(top, min(bottom - viewport_height, current_top + direction * 72))
+        self._trend_canvas.yview_moveto((target_top - top) / content_height)
 
     def _pick_input(self) -> None:
         path = filedialog.askopenfilename(title="KEQAS EQA raw data 선택", filetypes=[("Excel workbook", "*.xlsx")])
