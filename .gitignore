@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.deps/
+build/
+dist/
+*.spec
+HarmoCheck Results/
+TrendCharts/
+HarmoCheck_Report.pdf
+HarmoCheck_Tables.xlsx
+validation-output/
+docx-work/
+deliverables/
+scripts/
+*.xlsx
+!tests/**/*.xlsx
