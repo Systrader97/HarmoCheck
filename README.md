@@ -21,7 +21,7 @@ The program will not publish a harmonization result for an incomplete period; ev
 
 ## Harmonization classification
 
-At each level, the calculated TAE is compared with the analyte-specific total allowable error (TEa). The TFT study applied TEa criteria derived from the EFLM biological-variation database; HarmoCheck exposes the TEa thresholds in the application settings so that they can be reviewed or updated before analysis.
+At each level, the calculated TAE is compared with the analyte-specific total allowable error (TEa). We applied TEa criteria derived from the EFLM biological-variation database; HarmoCheck exposes the TEa thresholds in the application settings so that they can be reviewed or updated before analysis.
 
 | Harmonization level | Criterion |
 | --- | --- |
