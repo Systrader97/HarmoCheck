@@ -19,7 +19,7 @@ HarmoCheck derives the survey directly from the trailing material number in the 
 
 The program will not publish a harmonization result for an incomplete period; every eligible analyte must have all three PT materials after filtering.
 
-### Harmonization classification
+## Harmonization classification
 
 At each level, the calculated TAE is compared with the analyte-specific total allowable error (TEa). The TFT study applied TEa criteria derived from the EFLM biological-variation database; HarmoCheck exposes the TEa thresholds in the application settings so that they can be reviewed or updated before analysis.
 
